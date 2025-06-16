@@ -5,14 +5,14 @@ from io import BytesIO
 
 # Настройки
 API_KEY = "50892834-0d9273f841c1b13bbe865782b"  # ключ API
-query = "nature"
+query = "city"
 save_folder = "images_worker1"
-total_images = 100  # Сколько всего нужно скачать
+total_images = 1100  # Сколько всего нужно скачать
 
 # Создание папки, если её нет
 os.makedirs(save_folder, exist_ok=True)
 
-downloaded = 0
+downloaded = 1100
 page = 1
 
 while downloaded < total_images:
