@@ -1,108 +1,79 @@
 import socket
 import threading
-import os
-import pickle
+import glob
 
 HOST = '0.0.0.0'
 PORT = 12345
 
-# Пути к папкам с изображениями для каждого воркера
-worker_folders = [
-    "images_worker1",
-    "images_worker2",
-    "images_worker3",
-    "images_worker4"
-]
+EXPECTED_WORKERS = len(glob.glob('images_worker*'))
+finished_workers = 0
+finished_workers_lock = threading.Lock()
 
-clients = []
-results = []
-lock = threading.Lock()
-connected_workers = 0
+def recv_all(conn, length):
+    data = b''
+    while len(data) < length:
+        packet = conn.recv(length - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
 
-def send_task(conn, folder):
-    """Отправляем воркеру все изображения из папки."""
-    files = os.listdir(folder)
-    tasks = []
-    for fname in files:
-        path = os.path.join(folder, fname)
-        if os.path.isfile(path):
-            with open(path, "rb") as f:
-                data = f.read()
-            tasks.append({"name": fname, "data": data})
-
-    # Отправим количество задач
-    conn.sendall(len(tasks).to_bytes(4, 'big'))
-
-    # Отправляем по одной задаче (пиклированный объект с длиной)
-    for task in tasks:
-        data_bytes = pickle.dumps(task)
-        conn.sendall(len(data_bytes).to_bytes(4, 'big'))
-        conn.sendall(data_bytes)
-
-def receive_results(conn):
-    """Получаем от воркера результаты (хэши) и сохраняем их."""
-    global results
-    while True:
-        # Ждём длину результата (4 байта)
-        length_bytes = conn.recv(4)
-        if not length_bytes:
-            break
-        length = int.from_bytes(length_bytes, 'big')
-
-        data = b''
-        while len(data) < length:
-            more = conn.recv(length - len(data))
-            if not more:
-                break
-            data += more
-        if not data:
-            break
-
-        result = pickle.loads(data)
-        with lock:
-            results.append(result)
-        print(f"[+] Получен результат: {result['name']} -> {result['hash']}")
-
-def handle_worker(conn, addr, folder):
-    print(f"[=] Воркер подключился: {addr}, папка: {folder}")
+def handle_worker(conn, addr):
+    global finished_workers
+    print(f"[=] Воркер подключился: {addr}")
     try:
-        send_task(conn, folder)
-        receive_results(conn)
+        while True:
+            raw_len = recv_all(conn, 4)
+            if not raw_len:
+                break
+            msg_len = int.from_bytes(raw_len, 'big')
+
+            msg_bytes = recv_all(conn, msg_len)
+            if not msg_bytes:
+                break
+            msg = msg_bytes.decode()
+
+            if msg == "DONE":
+                print(f"[=] Воркер {addr} закончил работу")
+                break
+
+            # Ожидаем дальше хэш (следующее сообщение)
+            raw_hash_len = recv_all(conn, 4)
+            if not raw_hash_len:
+                break
+            hash_len = int.from_bytes(raw_hash_len, 'big')
+
+            hash_bytes = recv_all(conn, hash_len)
+            if not hash_bytes:
+                break
+            filehash = hash_bytes.decode()
+
+            print(f"[+] Получен результат: {msg} -> {filehash}")
+
     except Exception as e:
         print(f"[!] Ошибка с воркером {addr}: {e}")
     finally:
         conn.close()
-        print(f"[-] Воркер {addr} отключился")
+        with finished_workers_lock:
+            finished_workers += 1
 
 def main():
-    global connected_workers
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((HOST, PORT))
         s.listen()
-        print(f"[+] Сервер запущен на порту {PORT}. Ожидание 4 воркеров...")
+        print(f"[+] Сервер запущен на порту {PORT}. Ожидание {EXPECTED_WORKERS} воркеров...")
 
-        threads = []
+        while True:
+            if finished_workers >= EXPECTED_WORKERS:
+                print("[*] Все воркеры отработали. Завершаем работу сервера.")
+                break
 
-        while connected_workers < 4:
-            conn, addr = s.accept()
-            folder = worker_folders[connected_workers]
-            connected_workers += 1
-
-            t = threading.Thread(target=handle_worker, args=(conn, addr, folder), daemon=True)
-            threads.append(t)
-            t.start()
-
-        print("[*] Все воркеры подключились. Ждём завершения работы...")
-
-        # Ждём, пока все потоки не закончат работу
-        for t in threads:
-            t.join()
-
-        print("\n=== Итоговые результаты ===")
-        with lock:
-            for r in results:
-                print(f"{r['name']} -> {r['hash']}")
+            s.settimeout(1.0)  # таймаут для проверки условия выхода
+            try:
+                conn, addr = s.accept()
+                threading.Thread(target=handle_worker, args=(conn, addr), daemon=True).start()
+            except socket.timeout:
+                continue
 
 if __name__ == "__main__":
     main()

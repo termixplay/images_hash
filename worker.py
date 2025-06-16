@@ -1,59 +1,41 @@
 import socket
-import pickle
+import os
 import hashlib
+import time
+import sys
 
-SERVER_HOST = '127.0.0.1'
-SERVER_PORT = 12345
+HOST = '127.0.0.1'
+PORT = 12345
 
-def compute_hash(data):
+def get_hash(file_path):
+    with open(file_path, "rb") as f:
+        data = f.read()
     return hashlib.sha256(data).hexdigest()
 
+def send_message(conn, msg: str):
+    data = msg.encode()
+    conn.send(len(data).to_bytes(4, 'big'))
+    conn.send(data)
+
 def main():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.connect((SERVER_HOST, SERVER_PORT))
-        print("[*] Подключено к серверу")
+    if len(sys.argv) < 2:
+        print("Ошибка: не указана папка с изображениями.")
+        return
 
-        # Получаем количество задач (4 байта)
-        length_bytes = sock.recv(4)
-        if not length_bytes:
-            print("[!] Нет задач")
-            return
-        task_count = int.from_bytes(length_bytes, 'big')
-        print(f"[*] Получено {task_count} задач")
+    folder = sys.argv[1]  # папка задаётся при запуске
 
-        for _ in range(task_count):
-            # Получаем длину задачи (4 байта)
-            length_bytes = sock.recv(4)
-            if not length_bytes:
-                print("[!] Преждевременное завершение")
-                return
-            task_len = int.from_bytes(length_bytes, 'big')
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((HOST, PORT))
 
-            # Получаем задачу
-            data = b''
-            while len(data) < task_len:
-                part = sock.recv(task_len - len(data))
-                if not part:
-                    print("[!] Потеря данных")
-                    return
-                data += part
+        for filename in os.listdir(folder):
+            file_path = os.path.join(folder, filename)
+            if os.path.isfile(file_path):
+                filehash = get_hash(file_path)
+                send_message(s, filename)
+                send_message(s, filehash)
+                time.sleep(0.1)
 
-            task = pickle.loads(data)
-            fname = task["name"]
-            fdata = task["data"]
-
-            print(f"[*] Обрабатываю {fname}")
-
-            h = compute_hash(fdata)
-            result = pickle.dumps({"name": fname, "hash": h})
-
-            # Отправляем длину результата + данные
-            sock.sendall(len(result).to_bytes(4, 'big'))
-            sock.sendall(result)
-
-            print(f"[✓] Отправлен хэш: {h}")
-
-        print("[*] Все задачи выполнены, воркер завершает работу")
+        send_message(s, "DONE")
 
 if __name__ == "__main__":
     main()
