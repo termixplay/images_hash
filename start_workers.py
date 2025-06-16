@@ -5,7 +5,7 @@ import glob
 
 def run_worker(worker_num, folder):
     print(f"Запуск воркера {worker_num} для папки {folder}")
-    subprocess.run(['python', 'worker.py', folder])
+    subprocess.run(['python', 'worker.py', str(worker_num), folder])
 
 if __name__ == '__main__':
 

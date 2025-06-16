@@ -34,11 +34,12 @@ def connect_with_retries():
     return None
 
 def main():
-    if len(sys.argv) < 2:
-        print("Ошибка: не указана папка с изображениями.")
+    if len(sys.argv) < 3:
+        print("Использование: python worker.py <worker_id> <папка с изображениями>")
         return
 
-    folder = sys.argv[1]
+    worker_id = sys.argv[1]
+    folder = sys.argv[2]
 
     s = connect_with_retries()
     if not s:
@@ -46,6 +47,9 @@ def main():
         return
 
     with s:
+        # Сначала отправляем worker_id
+        send_message(s, worker_id)
+
         for filename in os.listdir(folder):
             file_path = os.path.join(folder, filename)
             if os.path.isfile(file_path):

@@ -1,111 +1,166 @@
 import socket
 import threading
-import uuid
+import json
+from datetime import datetime
 
 HOST = '0.0.0.0'
 PORT = 12345
 
+server_running = True
+
 active_workers = {}
 active_workers_lock = threading.Lock()
 
-server_running = True
+scan_history = []
+scan_history_lock = threading.Lock()
 
-def recv_all(conn, length):
+def recv_all(conn, n):
     data = b''
-    while len(data) < length:
-        try:
-            packet = conn.recv(length - len(data))
-        except ConnectionResetError:
-            print("[!] Соединение сброшено клиентом")
-            return None
-        except Exception as e:
-            print(f"[!] Ошибка при получении данных: {e}")
-            return None
+    while len(data) < n:
+        packet = conn.recv(n - len(data))
         if not packet:
             return None
         data += packet
     return data
 
-def handle_worker(conn, addr):
-    worker_id = str(uuid.uuid4())
-    print(f"[=] Воркер {worker_id} подключился: {addr}")
+def handle_ui_connection(conn, addr):
+    try:
+        with active_workers_lock:
+            status_list = []
+            for wid, data in active_workers.items():
+                status_list.append({
+                    "worker_id": wid,
+                    "files_processed": data.get('files_processed', 0),
+                    "done": data.get('done', False),
+                    "current_file": data.get('current_file', ''),
+                    "current_hash": data.get('current_hash', ''),
+                    "addr": f"{data['addr'][0]}:{data['addr'][1]}"
+                })
+        response = json.dumps(status_list).encode()
 
+        conn.sendall(len(response).to_bytes(4, 'big'))
+        conn.sendall(response)
+    except Exception as e:
+        print(f"[!] Ошибка при обработке UI: {e}")
+    finally:
+        conn.close()
+
+def handle_ui_history_request(conn):
+    try:
+        with scan_history_lock:
+            history_copy = list(scan_history)
+        response = json.dumps(history_copy).encode()
+
+        conn.sendall(len(response).to_bytes(4, 'big'))
+        conn.sendall(response)
+    except Exception as e:
+        print(f"[!] Ошибка при отправке истории: {e}")
+    finally:
+        conn.close()
+
+def handle_worker(conn, addr, worker_id):
+    print(f"[+] Подключился воркер {worker_id} с {addr}")
     with active_workers_lock:
-        active_workers[worker_id] = {'addr': addr, 'files_processed': 0, 'done': False}
+        active_workers[worker_id] = {
+            'files_processed': 0,
+            'done': False,
+            'current_file': '',
+            'current_hash': '',
+            'addr': addr
+        }
 
     try:
         while True:
             raw_len = recv_all(conn, 4)
             if not raw_len:
-                print(f"[!] Воркер {worker_id} отключился внезапно")
                 break
             msg_len = int.from_bytes(raw_len, 'big')
-
             msg_bytes = recv_all(conn, msg_len)
             if not msg_bytes:
-                print(f"[!] Воркер {worker_id} отключился во время чтения сообщения")
                 break
-            msg = msg_bytes.decode()
+            filename = msg_bytes.decode()
 
-            if msg == "DONE":
-                print(f"[=] Воркер {worker_id} закончил работу")
+            if filename == "DONE":
                 with active_workers_lock:
                     active_workers[worker_id]['done'] = True
+                print(f"[+] Воркер {worker_id} завершил работу")
                 break
 
-            raw_hash_len = recv_all(conn, 4)
-            if not raw_hash_len:
-                print(f"[!] Воркер {worker_id} отключился во время чтения хэша")
+            raw_len = recv_all(conn, 4)
+            if not raw_len:
                 break
-            hash_len = int.from_bytes(raw_hash_len, 'big')
-
+            hash_len = int.from_bytes(raw_len, 'big')
             hash_bytes = recv_all(conn, hash_len)
             if not hash_bytes:
-                print(f"[!] Воркер {worker_id} отключился во время чтения хэша")
                 break
             filehash = hash_bytes.decode()
 
             with active_workers_lock:
+                active_workers[worker_id]['current_file'] = filename
+                active_workers[worker_id]['current_hash'] = filehash
                 active_workers[worker_id]['files_processed'] += 1
 
-            print(f"[+] Воркер {worker_id}: {msg} -> {filehash}")
+            with scan_history_lock:
+                scan_history.append({
+                    "filename": filename,
+                    "hash": filehash,
+                    "status": "Выполнено",
+                    "worker_id": worker_id,
+                    "timestamp": datetime.now().isoformat()  # добавим время
+                })
+
+            print(f"[Worker {worker_id}] Обработан файл {filename} с хэшем {filehash}")
 
     except Exception as e:
         print(f"[!] Ошибка с воркером {worker_id}: {e}")
     finally:
-        conn.close()
         with active_workers_lock:
             if worker_id in active_workers:
-                active_workers[worker_id]['done'] = True
-        print(f"[=] Воркер {worker_id} отключился")
+                del active_workers[worker_id]
+        print(f"[-] Воркер {worker_id} отключился")
+        conn.close()
+
+def handle_connection(conn, addr):
+    try:
+        raw_len = recv_all(conn, 4)
+        if not raw_len:
+            conn.close()
+            return
+        msg_len = int.from_bytes(raw_len, 'big')
+        msg_bytes = recv_all(conn, msg_len)
+        if not msg_bytes:
+            conn.close()
+            return
+        msg = msg_bytes.decode()
+
+        if msg == "GET_STATUS":
+            handle_ui_connection(conn, addr)
+        elif msg == "GET_HISTORY":
+            handle_ui_history_request(conn)
+        else:
+            handle_worker(conn, addr, msg)
+    except Exception as e:
+        print(f"[!] Ошибка в handle_connection: {e}")
+        conn.close()
 
 def main():
     global server_running
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((HOST, PORT))
         s.listen()
         s.settimeout(1.0)
-        print(f"[+] Сервер запущен на порту {PORT}. Ожидание воркеров...")
+        print(f"[+] Сервер запущен на {HOST}:{PORT}")
 
         try:
             while server_running:
                 try:
                     conn, addr = s.accept()
-                    threading.Thread(target=handle_worker, args=(conn, addr), daemon=True).start()
+                    threading.Thread(target=handle_connection, args=(conn, addr), daemon=True).start()
                 except socket.timeout:
                     pass
-
-                # Проверяем, все ли воркеры завершились
-                with active_workers_lock:
-                    if active_workers and all(w['done'] for w in active_workers.values()):
-                        print("[*] Все воркеры завершили работу. Завершаем сервер.")
-                        break
-
         except KeyboardInterrupt:
-            print("\n[!] Получен сигнал прерывания. Завершаем работу сервера...")
-
+            print("\n[!] Завершение работы сервера...")
         finally:
             server_running = False
 
