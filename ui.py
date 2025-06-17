@@ -13,11 +13,34 @@ SERVER_PORT = 12345
 
 
 class HistoryScreen(MDScreen):
+
+    def fetch_worker_status(self):
+        try:
+            with socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=2) as s:
+                msg = "GET_STATUS".encode()
+                s.sendall(len(msg).to_bytes(4, 'big'))
+                s.sendall(msg)
+
+                raw_len = s.recv(4)
+                if not raw_len:
+                    return []
+                resp_len = int.from_bytes(raw_len, 'big')
+                data = b''
+                while len(data) < resp_len:
+                    packet = s.recv(resp_len - len(data))
+                    if not packet:
+                        return []
+                    data += packet
+                return json.loads(data.decode())
+        except Exception as e:
+            print(f"[UI] Ошибка при получении статуса воркеров: {e}")
+            return []
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self.sort_column = None
-        self.sort_ascending = True
+        self.sort_column = "timestamp"
+        self.sort_ascending = False
 
         layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
 
@@ -105,6 +128,7 @@ class HistoryScreen(MDScreen):
 
     def update_history(self, dt):
         try:
+            # Получаем историю
             with socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=2) as s:
                 msg = "GET_HISTORY".encode()
                 s.sendall(len(msg).to_bytes(4, 'big'))
@@ -120,26 +144,47 @@ class HistoryScreen(MDScreen):
                     if not packet:
                         return
                     data += packet
-                file_list = json.loads(data.decode())
+                history_list = json.loads(data.decode())
 
+            # Получаем список активных воркеров
+            worker_status = self.fetch_worker_status()
+
+            # Добавим записи "в процессе", если их ещё нет в истории
+            current_filenames = {entry["filename"] for entry in history_list}
+            for worker in worker_status:
+                fname = worker.get("current_file", "")
+                fhash = worker.get("current_hash", "")
+                if fname and fname not in current_filenames:
+                    history_list.append({
+                        "filename": fname,
+                        "hash": fhash,
+                        "status": "В процессе",
+                        "timestamp": "",  # Можно не указывать
+                    })
+
+            # Сортировка, если включена
             if self.sort_column:
-                file_list.sort(
+                history_list.sort(
                     key=lambda x: x.get(self.sort_column, ""),
                     reverse=not self.sort_ascending
                 )
 
+            # Всегда показывать "В процессе" вверху независимо от сортировки
+            history_list.sort(key=lambda x: 0 if x.get("status") == "В процессе" else 1)
+
+            # Обновим таблицу
             self.table.update_row_data(None, [
                 (
                     file.get("filename", ""),
                     file.get("hash", ""),
                     file.get("status", ""),
-                    file.get("timestamp", "").replace("T", " ").split(".")[0]
+                    file.get("timestamp", "").replace("T", " ").split(".")[0] if file.get("timestamp") else ""
                 )
-                for file in file_list
+                for file in history_list
             ])
 
         except Exception as e:
-            print(f"[UI] Ошибка при получении истории: {e}")
+            print(f"[UI] Ошибка при обновлении: {e}")
 
 
 class ScanHistoryApp(MDApp):
