@@ -106,7 +106,7 @@ def handle_worker(conn, addr, worker_id):
                     "hash": filehash,
                     "status": "Выполнено",
                     "worker_id": worker_id,
-                    "timestamp": datetime.now().isoformat()  # добавим время
+                    "timestamp": datetime.now().isoformat()
                 })
 
             print(f"[Worker {worker_id}] Обработан файл {filename} с хэшем {filehash}")
